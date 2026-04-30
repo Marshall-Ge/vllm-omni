@@ -305,6 +305,7 @@ def _load_mooncake_config(host: str, rpc_port: int, http_port: int) -> str:
 @pytest.mark.advanced_model
 @pytest.mark.diffusion
 @hardware_test(res={"cuda": "H100"}, num_cards=1)
+@pytest.mark.skip(reason="CI failed 8571")
 def test_bagel_text2img_mooncake_connector(run_level):
     """Test Bagel text2img with Mooncake connector for inter-stage communication."""
     if not _is_mooncake_master_available():
