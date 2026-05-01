@@ -197,7 +197,6 @@ def _resolve_deploy_config(config_path: str, run_level: str) -> str:
 @pytest.mark.advanced_model
 @pytest.mark.diffusion
 @hardware_test(res={"cuda": "H100", "rocm": "MI325"})
-@pytest.mark.skip(reason="CI failed 8574")
 def test_bagel_text2img_shared_memory_connector(run_level):
     """Test Bagel text2img with shared memory connector."""
     config_path = _resolve_deploy_config(BAGEL_CI_DEPLOY, run_level)
@@ -306,7 +305,6 @@ def _load_mooncake_config(host: str, rpc_port: int, http_port: int) -> str:
 @pytest.mark.advanced_model
 @pytest.mark.diffusion
 @hardware_test(res={"cuda": "H100"}, num_cards=1)
-@pytest.mark.skip(reason="CI failed 8571")
 def test_bagel_text2img_mooncake_connector(run_level):
     """Test Bagel text2img with Mooncake connector for inter-stage communication."""
     if not _is_mooncake_master_available():
