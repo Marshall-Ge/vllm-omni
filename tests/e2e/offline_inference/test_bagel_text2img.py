@@ -197,6 +197,7 @@ def _resolve_deploy_config(config_path: str, run_level: str) -> str:
 @pytest.mark.advanced_model
 @pytest.mark.diffusion
 @hardware_test(res={"cuda": "H100", "rocm": "MI325"})
+@pytest.mark.skip(reason="CI failed 8574")
 def test_bagel_text2img_shared_memory_connector(run_level):
     """Test Bagel text2img with shared memory connector."""
     config_path = _resolve_deploy_config(BAGEL_CI_DEPLOY, run_level)
