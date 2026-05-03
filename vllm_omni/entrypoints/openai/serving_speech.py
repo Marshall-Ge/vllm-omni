@@ -1764,6 +1764,13 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 tts_params = {}
             elif self._tts_model_type == "moss_tts_nano":
                 tts_params = await self._build_moss_tts_params(request)
+                # Propagate seed from sampling params for deterministic generation.
+                # MOSS-TTS-Nano uses its own internal sampling inside
+                # inference_stream(), which reads seed from additional_information
+                # (not SamplingParams). Without this the model uses ambient RNG
+                # state and produces non-deterministic output.
+                if sampling_params_list and getattr(sampling_params_list[0], "seed", None) is not None:
+                    tts_params["seed"] = [sampling_params_list[0].seed]
                 prompt = {"prompt_token_ids": [1], "additional_information": tts_params}
             else:
                 tts_params = self._build_tts_params(request)

@@ -186,6 +186,7 @@ def _upgrade_to_omni_request(
         cache_salt=request.cache_salt,
         data_parallel_rank=request.data_parallel_rank,
         prompt_embeds=prompt_embeds,
+        prompt_is_token_ids=request.prompt_is_token_ids,
         client_index=request.client_index,
         current_wave=request.current_wave,
         priority=request.priority,
@@ -193,6 +194,7 @@ def _upgrade_to_omni_request(
         resumable=request.resumable,
         external_req_id=request.external_req_id,
         reasoning_ended=request.reasoning_ended,
+        reasoning_parser_kwargs=request.reasoning_parser_kwargs,
         additional_information=additional_information,
     )
 
@@ -218,6 +220,7 @@ def _apply_omni_final_stage_metadata(
         cache_salt=request.cache_salt,
         data_parallel_rank=request.data_parallel_rank,
         prompt_embeds=request.prompt_embeds,
+        prompt_is_token_ids=request.prompt_is_token_ids,
         client_index=request.client_index,
         current_wave=request.current_wave,
         priority=request.priority,
@@ -225,6 +228,7 @@ def _apply_omni_final_stage_metadata(
         resumable=request.resumable,
         external_req_id=request.external_req_id,
         reasoning_ended=request.reasoning_ended,
+        reasoning_parser_kwargs=request.reasoning_parser_kwargs,
         additional_information=payload,
     )
 
@@ -756,6 +760,12 @@ class AsyncOmniEngine:
             )
 
         try:
+            # ------------------------------------------------------------------ #
+            # Pass 1: launch all LLM stages (asynchronous via ThreadPoolExecutor). #
+            # Diffusion stages are deferred to Pass 2 so that upstream LLM        #
+            # stages are fully initialized before the diffusion warmup (which may  #
+            # require KV cache from the LLM stage).                                #
+            # ------------------------------------------------------------------ #
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=max(1, llm_stage_count),
                 thread_name_prefix="llm-stage-launch",
@@ -770,6 +780,10 @@ class AsyncOmniEngine:
                     if self.single_stage_mode:
                         metadata.runtime_cfg = None
 
+                    if metadata.stage_type == "diffusion":
+                        # Deferred to Pass 2 (after LLM stages are ready).
+                        continue
+
                     stage_connector_spec = get_stage_connector_spec(
                         omni_transfer_config=omni_transfer_config,
                         stage_id=configured_stage_id,
@@ -777,60 +791,6 @@ class AsyncOmniEngine:
                     )
 
                     omni_kv_connector = resolve_omni_kv_config_for_stage(omni_transfer_config, configured_stage_id)
-
-                    if metadata.stage_type == "diffusion":
-                        is_remote_diffusion_stage = (
-                            self.single_stage_mode
-                            and self._single_stage_id_filter is not None
-                            and configured_stage_id != self._single_stage_id_filter
-                        )
-                        if is_remote_diffusion_stage:
-                            assert self._omni_master_server is not None
-                            stage_clients[stage_idx] = self._create_remote_diffusion_stage(
-                                metadata,
-                                stage_init_timeout,
-                                self._omni_master_server,
-                            )
-                            continue
-
-                        with llm_stage_launch_lock:
-                            previous_visible_devices = os.environ.get(device_control_env)
-                            try:
-                                setup_stage_devices(configured_stage_id, metadata.runtime_cfg)
-                                omni_conn_cfg, omni_from, omni_to = omni_kv_connector
-                                if omni_conn_cfg:
-                                    inject_omni_kv_config(stage_cfg, omni_conn_cfg, omni_from, omni_to)
-                                inject_kv_stage_info(stage_cfg, configured_stage_id, self.stage_configs)
-                                if self.single_stage_mode:
-                                    assert self._omni_master_server is not None
-                                    stage_clients[stage_idx] = self._launch_diffusion_stage(
-                                        stage_cfg,
-                                        metadata,
-                                        self._omni_master_server,
-                                        stage_init_timeout,
-                                    )
-                                else:
-                                    use_inline = True if self.num_stages == 1 else False
-                                    stage_clients[stage_idx] = initialize_diffusion_stage(
-                                        configured_stage_id,
-                                        self.model,
-                                        stage_cfg,
-                                        metadata,
-                                        stage_init_timeout=stage_init_timeout,
-                                        batch_size=self.diffusion_batch_size,
-                                        use_inline=use_inline,
-                                    )
-                                logger.info(
-                                    "[AsyncOmniEngine] Stage %s initialized (diffusion, batch_size=%d)",
-                                    configured_stage_id,
-                                    self.diffusion_batch_size,
-                                )
-                            finally:
-                                if previous_visible_devices is None:
-                                    current_omni_platform.unset_device_control_env_var()
-                                else:
-                                    current_omni_platform.set_device_control_env_var(previous_visible_devices)
-                        continue
 
                     llm_stage_positions.append(stage_idx)
 
@@ -865,6 +825,81 @@ class AsyncOmniEngine:
 
                 for stage_idx in llm_stage_positions:
                     started_llm_stages[stage_idx] = llm_launch_futures[stage_idx].result()
+
+            # ------------------------------------------------------------------ #
+            # Pass 2: initialize diffusion stages.  At this point all upstream    #
+            # LLM stages have completed startup, so the diffusion warmup          #
+            # (_dummy_run) can safely receive KV cache from those stages.         #
+            # ------------------------------------------------------------------ #
+            for stage_idx, stage_cfg in enumerate(self.stage_configs):
+                metadata = extract_stage_metadata(stage_cfg)
+                if metadata.stage_type != "diffusion":
+                    continue
+
+                configured_stage_id = metadata.stage_id
+                logger.info("[AsyncOmniEngine] Initializing stage %s (diffusion)", configured_stage_id)
+                if self.single_stage_mode:
+                    metadata.runtime_cfg = None
+
+                stage_connector_spec = get_stage_connector_spec(
+                    omni_transfer_config=omni_transfer_config,
+                    stage_id=configured_stage_id,
+                    async_chunk=async_chunk,
+                )
+
+                omni_kv_connector = resolve_omni_kv_config_for_stage(omni_transfer_config, configured_stage_id)
+
+                is_remote_diffusion_stage = (
+                    self.single_stage_mode
+                    and self._single_stage_id_filter is not None
+                    and configured_stage_id != self._single_stage_id_filter
+                )
+                if is_remote_diffusion_stage:
+                    assert self._omni_master_server is not None
+                    stage_clients[stage_idx] = self._create_remote_diffusion_stage(
+                        metadata,
+                        stage_init_timeout,
+                        self._omni_master_server,
+                    )
+                    continue
+
+                with llm_stage_launch_lock:
+                    previous_visible_devices = os.environ.get(device_control_env)
+                    try:
+                        setup_stage_devices(configured_stage_id, metadata.runtime_cfg)
+                        omni_conn_cfg, omni_from, omni_to = omni_kv_connector
+                        if omni_conn_cfg:
+                            inject_omni_kv_config(stage_cfg, omni_conn_cfg, omni_from, omni_to)
+                        inject_kv_stage_info(stage_cfg, configured_stage_id, self.stage_configs)
+                        if self.single_stage_mode:
+                            assert self._omni_master_server is not None
+                            stage_clients[stage_idx] = self._launch_diffusion_stage(
+                                stage_cfg,
+                                metadata,
+                                self._omni_master_server,
+                                stage_init_timeout,
+                            )
+                        else:
+                            use_inline = True if self.num_stages == 1 else False
+                            stage_clients[stage_idx] = initialize_diffusion_stage(
+                                configured_stage_id,
+                                self.model,
+                                stage_cfg,
+                                metadata,
+                                stage_init_timeout=stage_init_timeout,
+                                batch_size=self.diffusion_batch_size,
+                                use_inline=use_inline,
+                            )
+                        logger.info(
+                            "[AsyncOmniEngine] Stage %s initialized (diffusion, batch_size=%d)",
+                            configured_stage_id,
+                            self.diffusion_batch_size,
+                        )
+                    finally:
+                        if previous_visible_devices is None:
+                            current_omni_platform.unset_device_control_env_var()
+                        else:
+                            current_omni_platform.set_device_control_env_var(previous_visible_devices)
 
             attach_futures: dict[concurrent.futures.Future[tuple[Any, Any, Any, InputProcessor | None]], int] = {}
             with concurrent.futures.ThreadPoolExecutor(
