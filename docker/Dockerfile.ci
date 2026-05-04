@@ -24,7 +24,7 @@ RUN VLLM_WHEEL_URL=$(python3 -c "import urllib.request,re; \
     html=urllib.request.urlopen(index_url).read().decode(); \
     m=re.search(r'href=\"([^\"]*x86_64\.whl)\"',html); \
     assert m, f'No x86_64 vLLM wheel found at {index_url}'; \
-    print(quote(urljoin(index_url,m.group(1)), safe=':/'))") && \
+    print(quote(urljoin(index_url,m.group(1)), safe=':/+'))") && \
     echo "Installing vLLM from: ${VLLM_WHEEL_URL}" && \
     uv pip install --system --force-reinstall "${VLLM_WHEEL_URL}"
 
