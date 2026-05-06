@@ -1,7 +1,7 @@
 # Test Guide
 ## Setting Up the Test Environment
 ### Creating a Container
-vLLM-Omni provides an official CUDA Docker image for deployment. These images are built upon vLLM Docker images and are available on [Docker Hub](https://hub.docker.com/r/vllm/vllm-omni/tags). Release builds publish the matching git tag, stable releases also refresh `latest`, prerelease tags currently build from the upstream `nightly` base image, and nightly automation refreshes `nightly`.
+vLLM-Omni provides an official Docker image for deployment. These images are built upon vLLM Docker images and are available on [Docker Hub](https://hub.docker.com/r/vllm/vllm-omni/tags). The version of vLLM-Omni indicates which vLLM release it is based on.
 For a local test environment, you can follow the steps below to create a container:
 ## Installing Dependencies
 ### vLLM & vLLM-Omni
