@@ -1,0 +1,150 @@
+name: Publish Docker Images
+
+on:
+  release:
+    types:
+      - published
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Image channel to publish"
+        required: true
+        default: nightly
+        type: choice
+        options:
+          - nightly
+          - release
+      release_tag:
+        description: "Release tag to publish when channel=release, for example v0.20.0rc1"
+        required: false
+        type: string
+
+concurrency:
+  group: publish-docker-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish-cuda-image:
+    name: Publish CUDA image to Docker Hub
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      IMAGE_NAME: vllm/vllm-omni
+      DOCKERFILE: docker/Dockerfile.cuda
+
+    steps:
+      - name: Resolve checkout ref
+        id: ref
+        env:
+          INPUT_CHANNEL: ${{ inputs.channel }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          ref="${GITHUB_REF}"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${INPUT_CHANNEL}" == "release" ]]; then
+            if [[ -z "${INPUT_RELEASE_TAG}" ]]; then
+              echo "release_tag is required when channel=release" >&2
+              exit 1
+            fi
+            ref="refs/tags/${INPUT_RELEASE_TAG}"
+          fi
+          echo "ref=${ref}" >> "${GITHUB_OUTPUT}"
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
+
+      - name: Resolve publish metadata
+        id: meta
+        env:
+          INPUT_CHANNEL: ${{ inputs.channel }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          EVENT_PRERELEASE: ${{ github.event.release.prerelease }}
+          EVENT_RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+
+          channel="nightly"
+          release_tag=""
+          base_image="vllm/vllm-openai:nightly"
+
+          if [[ "${GITHUB_EVENT_NAME}" == "release" ]]; then
+            channel="release"
+            release_tag="${EVENT_RELEASE_TAG}"
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${INPUT_CHANNEL}" == "release" ]]; then
+            channel="release"
+            release_tag="${INPUT_RELEASE_TAG}"
+          fi
+
+          tags=()
+          if [[ "${channel}" == "release" ]]; then
+            if [[ -z "${release_tag}" ]]; then
+              echo "Unable to determine release tag for release publish" >&2
+              exit 1
+            fi
+
+            if [[ "${release_tag}" =~ rc[0-9]+$ ]]; then
+              # Upstream does not currently publish per-RC vllm-openai images,
+              # so prerelease omni tags must be layered on top of upstream nightly.
+              base_image="vllm/vllm-openai:nightly"
+            else
+              base_image="vllm/vllm-openai:${release_tag}"
+            fi
+            tags+=("${IMAGE_NAME}:${release_tag}")
+
+            if [[ "${EVENT_PRERELEASE}" != "true" && ! "${release_tag}" =~ rc[0-9]+$ ]]; then
+              tags+=("${IMAGE_NAME}:latest")
+            fi
+          else
+            date_tag="$(date -u +%Y%m%d)"
+            short_sha="$(git rev-parse --short=12 HEAD)"
+            tags+=("${IMAGE_NAME}:nightly")
+            tags+=("${IMAGE_NAME}:nightly-${date_tag}")
+            tags+=("${IMAGE_NAME}:sha-${short_sha}")
+          fi
+
+          {
+            echo "channel=${channel}"
+            echo "base_image=${base_image}"
+            echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "revision=$(git rev-parse HEAD)"
+            if [[ "${channel}" == "release" ]]; then
+              echo "version=${release_tag}"
+            else
+              echo "version=nightly"
+            fi
+            echo "tags<<EOF"
+            printf '%s\n' "${tags[@]}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ env.DOCKERFILE }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            BASE_IMAGE=${{ steps.meta.outputs.base_image }}
+          labels: |
+            org.opencontainers.image.title=vLLM-Omni
+            org.opencontainers.image.description=vLLM-Omni CUDA image built from official vLLM base images.
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.revision }}
+            org.opencontainers.image.created=${{ steps.meta.outputs.created }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
