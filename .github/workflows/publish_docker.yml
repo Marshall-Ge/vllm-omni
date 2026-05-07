@@ -32,6 +32,7 @@ jobs:
     permissions:
       contents: read
     env:
+      UPSTREAM_REPOSITORY: vllm-project/vllm-omni
       IMAGE_NAME: vllm/vllm-omni
       DOCKERFILE: docker/Dockerfile.cuda
 
@@ -57,8 +58,8 @@ jobs:
         with:
           ref: ${{ steps.ref.outputs.ref }}
 
-      - name: Resolve publish metadata
-        id: meta
+      - name: Resolve publish context
+        id: context
         env:
           INPUT_CHANNEL: ${{ inputs.channel }}
           INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
@@ -79,7 +80,6 @@ jobs:
             release_tag="${INPUT_RELEASE_TAG}"
           fi
 
-          tags=()
           if [[ "${channel}" == "release" ]]; then
             if [[ -z "${release_tag}" ]]; then
               echo "Unable to determine release tag for release publish" >&2
@@ -93,35 +93,18 @@ jobs:
             else
               base_image="vllm/vllm-openai:${release_tag}"
             fi
-            tags+=("${IMAGE_NAME}:${release_tag}")
-
-            if [[ "${EVENT_PRERELEASE}" != "true" && ! "${release_tag}" =~ rc[0-9]+$ ]]; then
-              tags+=("${IMAGE_NAME}:latest")
-            fi
-          else
-            date_tag="$(date -u +%Y%m%d)"
-            short_sha="$(git rev-parse --short=12 HEAD)"
-            tags+=("${IMAGE_NAME}:nightly")
-            tags+=("${IMAGE_NAME}:nightly-${date_tag}")
-            tags+=("${IMAGE_NAME}:sha-${short_sha}")
           fi
 
           {
             echo "channel=${channel}"
             echo "base_image=${base_image}"
-            echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            echo "revision=$(git rev-parse HEAD)"
-            if [[ "${channel}" == "release" ]]; then
-              echo "version=${release_tag}"
+            echo "release_tag=${release_tag}"
+            if [[ "${channel}" == "release" && "${EVENT_PRERELEASE}" != "true" && ! "${release_tag}" =~ rc[0-9]+$ ]]; then
+              echo "stable_release=true"
             else
-              echo "version=nightly"
+              echo "stable_release=false"
             fi
-            echo "tags<<EOF"
-            printf '%s\n' "${tags[@]}"
-            echo "EOF"
           } >> "${GITHUB_OUTPUT}"
-
-      - uses: docker/setup-buildx-action@v3
 
       - name: Resolve push mode
         id: push-mode
@@ -130,18 +113,52 @@ jobs:
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if [[ -n "${DOCKERHUB_USERNAME}" && -n "${DOCKERHUB_TOKEN}" ]]; then
-            echo "push=true" >> "${GITHUB_OUTPUT}"
-            echo "mode=publish" >> "${GITHUB_OUTPUT}"
-          else
-            echo "push=false" >> "${GITHUB_OUTPUT}"
-            echo "mode=build-only" >> "${GITHUB_OUTPUT}"
+
+          publish_allowed="false"
+          publish_reason="fork-or-missing-secrets"
+
+          if [[ "${GITHUB_REPOSITORY}" == "${UPSTREAM_REPOSITORY}" && -n "${DOCKERHUB_USERNAME}" && -n "${DOCKERHUB_TOKEN}" ]]; then
+            publish_allowed="true"
+            publish_reason="upstream-with-secrets"
+          elif [[ "${GITHUB_REPOSITORY}" != "${UPSTREAM_REPOSITORY}" ]]; then
+            publish_reason="non-upstream-repository"
+          elif [[ -z "${DOCKERHUB_USERNAME}" || -z "${DOCKERHUB_TOKEN}" ]]; then
+            publish_reason="missing-dockerhub-secrets"
           fi
+
+          {
+            echo "push=${publish_allowed}"
+            if [[ "${publish_allowed}" == "true" ]]; then
+              echo "mode=publish"
+            else
+              echo "mode=build-only"
+            fi
+            echo "reason=${publish_reason}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Generate image tags and labels
+        id: docker-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ steps.context.outputs.release_tag }},enable=${{ steps.context.outputs.channel == 'release' }}
+            type=raw,value=latest,enable=${{ steps.context.outputs.stable_release == 'true' }}
+            type=raw,value=nightly,enable=${{ steps.context.outputs.channel != 'release' }}
+            type=raw,value=nightly-{{date 'YYYYMMDD'}},enable=${{ steps.context.outputs.channel != 'release' }}
+            type=sha,format=short,prefix=sha-,enable=${{ steps.context.outputs.channel != 'release' }}
+          labels: |
+            org.opencontainers.image.title=vLLM-Omni
+            org.opencontainers.image.description=vLLM-Omni CUDA image built from official vLLM base images.
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.context.outputs.release_tag || 'nightly' }}
+      - uses: docker/setup-buildx-action@v3
 
       - name: Announce build-only validation mode
         if: ${{ steps.push-mode.outputs.push != 'true' }}
         run: |
-          echo "Docker Hub secrets are not configured for this repository."
+          echo "Skipping Docker Hub publish for reason: ${{ steps.push-mode.outputs.reason }}"
           echo "Running the workflow in build-only mode to validate the Docker build path."
 
       - name: Log in to Docker Hub
@@ -157,16 +174,9 @@ jobs:
           context: .
           file: ${{ env.DOCKERFILE }}
           push: ${{ steps.push-mode.outputs.push }}
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ steps.docker-meta.outputs.tags }}
           build-args: |
-            BASE_IMAGE=${{ steps.meta.outputs.base_image }}
-          labels: |
-            org.opencontainers.image.title=vLLM-Omni
-            org.opencontainers.image.description=vLLM-Omni CUDA image built from official vLLM base images.
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ steps.meta.outputs.revision }}
-            org.opencontainers.image.created=${{ steps.meta.outputs.created }}
-            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            BASE_IMAGE=${{ steps.context.outputs.base_image }}
+          labels: ${{ steps.docker-meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
