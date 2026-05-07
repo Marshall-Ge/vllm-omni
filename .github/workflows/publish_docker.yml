@@ -99,7 +99,7 @@ jobs:
             echo "channel=${channel}"
             echo "base_image=${base_image}"
             echo "release_tag=${release_tag}"
-            if [[ "${channel}" == "release" && "${EVENT_PRERELEASE}" != "true" && ! "${release_tag}" =~ rc[0-9]+$ ]]; then
+            if [[ "${GITHUB_EVENT_NAME}" == "release" && "${EVENT_PRERELEASE}" != "true" && ! "${release_tag}" =~ rc[0-9]+$ ]]; then
               echo "stable_release=true"
             else
               echo "stable_release=false"
