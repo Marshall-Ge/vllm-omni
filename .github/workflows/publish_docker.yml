@@ -123,7 +123,29 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      - name: Resolve push mode
+        id: push-mode
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${DOCKERHUB_USERNAME}" && -n "${DOCKERHUB_TOKEN}" ]]; then
+            echo "push=true" >> "${GITHUB_OUTPUT}"
+            echo "mode=publish" >> "${GITHUB_OUTPUT}"
+          else
+            echo "push=false" >> "${GITHUB_OUTPUT}"
+            echo "mode=build-only" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Announce build-only validation mode
+        if: ${{ steps.push-mode.outputs.push != 'true' }}
+        run: |
+          echo "Docker Hub secrets are not configured for this repository."
+          echo "Running the workflow in build-only mode to validate the Docker build path."
+
       - name: Log in to Docker Hub
+        if: ${{ steps.push-mode.outputs.push == 'true' }}
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -134,7 +156,7 @@ jobs:
         with:
           context: .
           file: ${{ env.DOCKERFILE }}
-          push: true
+          push: ${{ steps.push-mode.outputs.push }}
           tags: ${{ steps.meta.outputs.tags }}
           build-args: |
             BASE_IMAGE=${{ steps.meta.outputs.base_image }}
