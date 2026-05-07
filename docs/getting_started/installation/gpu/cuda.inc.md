@@ -93,15 +93,7 @@ uv pip install --no-build-isolation --editable .
 
 # --8<-- [start:pre-built-images]
 
-vLLM-Omni offers an official CUDA docker image for deployment. These images are built on top of vLLM docker images and available on Docker Hub as [vllm/vllm-omni](https://hub.docker.com/r/vllm/vllm-omni/tags).
-
-Published tags follow these rules:
-
-- Release builds publish the matching git tag, for example `v0.20.0rc1` or `v0.20.0`.
-- Stable non-RC releases also refresh `latest`.
-- Nightly builds publish both `nightly` and a date-stamped tag such as `nightly-20260506`.
-
-RC tags are currently built on top of the upstream `vllm/vllm-openai:nightly` base image, because upstream prerelease CUDA images are not published with matching `rc` tags.
+vLLM-Omni offers an official docker image for deployment. These images are built on top of vLLM docker images and available on Docker Hub as [vllm/vllm-omni](https://hub.docker.com/r/vllm/vllm-omni/tags). The version of vLLM-Omni indicates which release of vLLM it is based on.
 
 Here's an example deployment command that has been verified on 2 x H100's:
 ```bash
@@ -110,11 +102,9 @@ docker run --runtime nvidia --gpus 2 \
     --env "HF_TOKEN=$HF_TOKEN" \
     -p 8091:8091 \
     --ipc=host \
-    vllm/vllm-omni:v0.20.0rc1 \
+    vllm/vllm-omni:v0.18.0 \
     --model Qwen/Qwen3-Omni-30B-A3B-Instruct --port 8091
 ```
-
-If you want the most recent automated build from `main`, switch the image tag to `nightly`.
 
 !!! tip
     You can use this docker image to serve models the same way you would with in vLLM! To do so, make sure you overwrite the default entrypoint (`vllm serve --omni`) which works only for models supported in the vLLM-Omni project.
