@@ -373,9 +373,7 @@ class Wan22Pipeline(
         # checkpoint, leaving it as all-zeros. This silently destroys prompt
         # encoding and produces output disconnected from the prompt. Force
         # tying so that ``embed_tokens`` shares ``shared.weight`` as intended.
-        text_enc_cfg = AutoConfig.from_pretrained(
-            model, subfolder="text_encoder", local_files_only=local_files_only
-        )
+        text_enc_cfg = AutoConfig.from_pretrained(model, subfolder="text_encoder", local_files_only=local_files_only)
         text_enc_cfg.tie_word_embeddings = True
         self.text_encoder = from_pretrained_with_prefetch(
             UMT5EncoderModel.from_pretrained,
